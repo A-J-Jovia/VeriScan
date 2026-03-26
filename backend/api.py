@@ -1,44 +1,50 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
 import pandas as pd
 import joblib
-import uvicorn
 
-# 1. Load the Brain
-model = joblib.load('veriscan_brain.pkl')
+print("Booting VeriScan Inference Engine...")
+
+# 1. Load the Entire Pipeline (Scaler + Brain)
+try:
+    model_pipeline = joblib.load('veriscan_pipeline.pkl')
+    print("Pipeline loaded successfully.")
+except FileNotFoundError:
+    raise RuntimeError("veriscan_pipeline.pkl missing. Run model.py first.")
 
 # 2. Start the API
-app = FastAPI(title="VeriScan AI API")
+app = FastAPI(title="VeriScan API", version="2.0")
 
-# 3. Define the incoming data from the Flutter App
+# 3. Strict Input Validation via Pydantic
 class ScanData(BaseModel):
-    channels: list[int] # Expecting exactly 18 numbers from the ESP32
+    # We force the Flutter app to send exactly 18 integers. 
+    # If they send 17 or 19, the API rejects it automatically with a 422 error.
+    channels: list[int] = Field(..., min_length=18, max_length=18)
 
 @app.post("/predict")
 def predict_pill(data: ScanData):
-    # Check if we got exactly 18 channels
-    if len(data.channels) != 18:
-        return {"error": "Expected exactly 18 channels of data."}
+    try:
+        # Convert the 18 incoming integers into a 1-row DataFrame 
+        # with the exact column names expected by the cleaning logic.
+        columns = [f'CH{i}' for i in range(1, 19)]
+        df = pd.DataFrame([data.channels], columns=columns)
 
-    # Convert the 18 numbers into a DataFrame with the exact column names the AI learned
-    columns = [f'CH{i}' for i in range(1, 19)]
-    df = pd.DataFrame([data.channels], columns=columns)
+        # Drop the 3 saturated channels to match the 15-channel pipeline
+        df_clean = df.drop(columns=['CH6', 'CH12', 'CH18'])
 
-    # Drop the 3 saturated channels (CH6, CH12, CH18) just like we did in training
-    df_clean = df.drop(columns=['CH6', 'CH12', 'CH18'])
+        # The pipeline automatically applies the L1 Normalizer to this single row, 
+        # then passes it to the Random Forest.
+        prediction = model_pipeline.predict(df_clean)[0]
 
-    # Ask the AI to make a prediction!
-    prediction = model.predict(df_clean)[0]
+        return {
+            "status": "success",
+            "verdict": str(prediction)
+        }
 
-    # Return the verdict to the Flutter app
-    return {
-        "status": "success",
-        "verdict": prediction
-    }
+    except Exception as e:
+        # Catch any unexpected Pandas/Scikit-Learn errors so the server doesn't crash
+        raise HTTPException(status_code=500, detail=f"Inference failed: {str(e)}")
 
-print("--- VERISCAN API READY ---")
-print("Tell Faz to send a POST request to: http://localhost:8000/predict")
-
-# Run the server (Only if this file is run directly)
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+@app.get("/health")
+def health_check():
+    return {"status": "active", "model": "veriscan_pipeline.pkl"}

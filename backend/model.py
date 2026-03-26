@@ -1,46 +1,62 @@
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import Normalizer
+from sklearn.pipeline import Pipeline
 from sklearn.metrics import accuracy_score, classification_report
 import joblib
 
-print("--- VERISCAN MASTER AI TRAINING ---")
+print("--- VERISCAN MASTER PIPELINE TRAINING v2 ---")
 
 # 1. Load Data
+# (Using  current scans.csv. Will update this filename after gather V2 datavfrom the updated hardware)
 try:
     df = pd.read_csv('scans.csv')
-    print(f"Loaded {len(df)} scans successfully.")
+    print(f"Loaded {len(df)} raw scans.")
 except FileNotFoundError:
-    print("Error: scans.csv not found!")
+    print("FATAL: scans.csv not found! Place it in the backend/ directory.")
     exit()
 
-# 2. Clean the Data
-# Drop the SCAN_NUM column (index 0) and the saturated channels (6, 12, 18).
-# Python uses 0-based indexing, so columns 6, 12, and 18 are at indices 6, 12, and 18.
-# The label is the last column (-1).
-columns_to_drop = [df.columns[0], df.columns[6], df.columns[12], df.columns[18], df.columns[-1]]
-X = df.drop(columns_to_drop, axis=1) 
-y = df.iloc[:, -1] # The text labels
+# 2. Clean Data (Strict Column Dropping)
+# We drop SCAN_NUM (useless for ML) and the 3 saturated channels.
+# Dropped CH18 which is nir for now. Will add it back once hardware is tuned 
+columns_to_drop = ['SCAN_NUM', 'CH6', 'CH12', 'CH18']
 
-# 3. Split Data for Testing
+# Safely drop only the columns that actually exist in the dataframe
+X = df.drop(columns=[col for col in columns_to_drop if col in df.columns])
+
+# Extract the labels (target variable)
+# Ensure we don't accidentally leave the LABEL column in the training features (X)
+target_col = 'LABEL'
+if target_col in X.columns:
+    y = X[target_col]
+    X = X.drop(columns=[target_col])
+else:
+    # Fallback if the column is not explicitly named 'LABEL'
+    y = df.iloc[:, -1]
+    X = X.iloc[:, :-1]
+
+print(f"Features mapped: {len(X.columns)} channels remaining after cleaning.")
+
+# 3. Train/Test Split
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-# 4. Train the Brain
-print("\nTraining Random Forest Classifier...")
-rf_model = RandomForestClassifier(n_estimators=200, max_depth=10, random_state=42)
-rf_model.fit(X_train, y_train)
+# 4. Row-wise L1 Normalization -> Random Forest
+print("Training L1-Normalized Random Forest Pipeline...")
+pipeline = Pipeline([
+    # norm='l1' forces the sum of the 15 channels to equal 1.0 (100%)
+    # This extracts the chemical ratio and eliminates physical distance variance.
+    ('scaler', Normalizer(norm='l1')), 
+    ('classifier', RandomForestClassifier(n_estimators=200, max_depth=10, random_state=42))
+])
 
-# 5. Test Accuracy
-predictions = rf_model.predict(X_test)
-accuracy = accuracy_score(y_test, predictions)
+pipeline.fit(X_train, y_train)
 
-print(f"\n--- RESULTS ---")
-print(f"AI Accuracy Score: {accuracy * 100:.2f}%")
-print("\nClassification Report:")
-print(classification_report(y_test, predictions))
+# 5. Scientific Validation
+y_pred = pipeline.predict(X_test)
+print(f"\nValidation Accuracy: {accuracy_score(y_test, y_pred) * 100:.2f}%\n")
+print(classification_report(y_test, y_pred))
 
-# 6. Save the model
-model_filename = 'veriscan_brain.pkl'
-joblib.dump(rf_model, model_filename)
-print(f"\nSUCCESS: Model saved as '{model_filename}'.")
-print("Hand this file to the FastAPI backend!")
+# 6. Save the ENTIRE Pipeline
+joblib.dump(pipeline, 'veriscan_pipeline.pkl')
+print("\n[SUCCESS] Pipeline saved as veriscan_pipeline.pkl")

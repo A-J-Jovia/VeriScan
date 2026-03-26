@@ -1,6 +1,5 @@
 # VeriScan: Deep-Tech Multispectral Pill Authentication
 
-**Technology Readiness Level (TRL):** 4 (Laboratory-Grade Prototype)  
 **Domain:** IoT, Edge AI, Optical Physics, Healthcare Security  
 
 ## 📖 Executive Summary
